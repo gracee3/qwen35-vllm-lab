@@ -9,9 +9,9 @@ TP_SIZE := 1
 MAX_MODEL_LEN := 262144
 MAX_NUM_SEQS := 1
 SERVED_MODEL_NAME := qwen35a3b-fp8
-GPU_MEM_UTIL_BOOT := 0.82
+GPU_MEM_UTIL_BOOT := 0.70
 GPU_MEM_UTIL_FAST := 0.84
-MAX_NUM_BATCHED_TOKENS_BOOT := 2048
+MAX_NUM_BATCHED_TOKENS_BOOT := 1024
 MAX_NUM_BATCHED_TOKENS_FAST := 4096
 RUNTIME_ARGS_BASE := --language-model-only --kv-cache-dtype fp8_e4m3 --enable-chunked-prefill --api-key local --served-model-name $(SERVED_MODEL_NAME)
 RUNTIME_ARGS_TOOLS := --enable-auto-tool-choice --tool-call-parser qwen3_coder
@@ -43,7 +43,6 @@ run-qwen35-boot:
 	  --max-model-len $(MAX_MODEL_LEN) \
 	  --max-num-seqs $(MAX_NUM_SEQS) \
 	  --max-num-batched-tokens $(MAX_NUM_BATCHED_TOKENS_BOOT) \
-	  --cpu-offload-gb 4 \
 	  --enforce-eager \
 	  $(RUNTIME_ARGS)
 	docker logs --follow $(CONTAINER_NAME) 2>&1 | tee out.log
