@@ -1,10 +1,10 @@
-.PHONY: up down logs status run-qwen35-boot run-qwen35-fast run-qwen35-bf16-boot run-qwen35-bf16-fast run-qwen35-awq-boot bench
+.PHONY: up down logs status run-qwen35-boot run-qwen35-fast run-qwen35-bf16-boot run-qwen35-bf16-fast run-qwen35-awq-boot bench bench-bf16 bench-fp8
 
 CONTAINER_NAME := vllm-qwen35
 IMAGE := vllm/vllm-openai:cu130-nightly-x86_64
 
 MODEL_PATH_FP8 := /data/models/Qwen3.5-35B-A3B-FP8
-MODEL_PATH_BF16 := /data/models/Qwen3.5-35B-A3B
+MODEL_PATH_BF16 := /data/models/Qwen/Qwen3.5-35B-A3B
 MODEL_PATH_AWQ := /data/models/Qwen3.5-35B-A3B-AWQ
 MODEL_PATH := $(MODEL_PATH_FP8)
 CACHE_PATH := $(HOME)/.cache/vllm
@@ -17,7 +17,7 @@ MAX_NUM_SEQS := 1
 SERVED_MODEL_NAME_FP8 := qwen35a3b-fp8
 SERVED_MODEL_NAME_BF16 := qwen35a3b-bf16
 SERVED_MODEL_NAME_AWQ := qwen35a3b-awq
-BENCH_MODEL_NAME := $(SERVED_MODEL_NAME_FP8)
+BENCH_MODEL_NAME ?= $(SERVED_MODEL_NAME_BF16)
 
 GPU_MEM_UTIL_BOOT := 0.70
 GPU_MEM_UTIL_FAST := 0.84
@@ -203,3 +203,9 @@ bench:
 	  time_s, tokens = run()
 	  print(f"run{i + 1}: {time_s:.3f}s  completion={tokens}  decode={tokens/time_s:.1f} tok/s")
 	PY
+
+bench-bf16:
+	$(MAKE) BENCH_MODEL_NAME=$(SERVED_MODEL_NAME_BF16) bench
+
+bench-fp8:
+	$(MAKE) BENCH_MODEL_NAME=$(SERVED_MODEL_NAME_FP8) bench
