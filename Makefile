@@ -43,6 +43,7 @@ run-qwen35-boot:
 	  --max-model-len $(MAX_MODEL_LEN) \
 	  --max-num-seqs $(MAX_NUM_SEQS) \
 	  --max-num-batched-tokens $(MAX_NUM_BATCHED_TOKENS_BOOT) \
+	  --cpu-offload-gb 4 \
 	  --enforce-eager \
 	  $(RUNTIME_ARGS)
 	docker logs --follow $(CONTAINER_NAME) 2>&1 | tee out.log
