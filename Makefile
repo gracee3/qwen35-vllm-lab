@@ -31,10 +31,14 @@ COMMON_DOCKER_ARGS := \
 	  -v $(CACHE_PATH):/cache \
 	  --restart no
 
+BOOT_MOE_ARGS := \
+	  -e VLLM_USE_FLASHINFER_MOE_FP16=1
+
 run-qwen35-boot:
 	-@docker rm -f $(CONTAINER_NAME) >/dev/null 2>&1
 	docker run -d --name $(CONTAINER_NAME) \
 	  $(COMMON_DOCKER_ARGS) \
+	  $(BOOT_MOE_ARGS) \
 	  $(IMAGE) \
 	  /model \
 	  --host 0.0.0.0 --port 8000 \
