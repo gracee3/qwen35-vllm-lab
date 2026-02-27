@@ -1,11 +1,11 @@
-.PHONY: up down logs status run-qwen35-boot run-qwen35-fast run-qwen35-bf16-boot run-qwen35-bf16-fast run-qwen35-bf16-tp2-boot run-qwen35-bf16-tp2-fast run-qwen35-awq-boot bench bench-bf16 bench-fp8
+.PHONY: up down logs status run-qwen35-boot run-qwen35-fast run-qwen35-bf16-boot run-qwen35-bf16-fast run-qwen35-bf16-tp2-boot run-qwen35-bf16-tp2-fast run-qwen35-awq-boot run-qwen35-awq-fast bench bench-bf16 bench-fp8
 
 CONTAINER_NAME := vllm-qwen35
 IMAGE := vllm/vllm-openai:cu130-nightly-x86_64
 
 MODEL_PATH_FP8 := /data/models/Qwen3.5-35B-A3B-FP8
 MODEL_PATH_BF16 := /data/models/Qwen/Qwen3.5-35B-A3B
-MODEL_PATH_AWQ := /data/models/Qwen3.5-35B-A3B-AWQ
+MODEL_PATH_AWQ := /data/models/QuantTrio/Qwen3.5-35B-A3B-AWQ
 MODEL_PATH := $(MODEL_PATH_FP8)
 CACHE_PATH := $(HOME)/.cache/vllm
 
@@ -28,6 +28,7 @@ GPU_MEM_UTIL_BF16_FAST := 0.84
 GPU_MEM_UTIL_BF16_TP2_BOOT := 0.86
 GPU_MEM_UTIL_BF16_TP2_FAST := 0.84
 GPU_MEM_UTIL_AWQ_BOOT := 0.90
+GPU_MEM_UTIL_AWQ_FAST := 0.90
 
 MAX_NUM_BATCHED_TOKENS_BOOT := 1024
 MAX_NUM_BATCHED_TOKENS_FAST := 4096
@@ -36,6 +37,7 @@ MAX_NUM_BATCHED_TOKENS_BF16_FAST := 4096
 MAX_NUM_BATCHED_TOKENS_BF16_TP2_BOOT := 2048
 MAX_NUM_BATCHED_TOKENS_BF16_TP2_FAST := 4096
 MAX_NUM_BATCHED_TOKENS_AWQ_BOOT := 8192
+MAX_NUM_BATCHED_TOKENS_AWQ_FAST := 8192
 
 RUNTIME_ARGS_BASE := --language-model-only --kv-cache-dtype fp8_e4m3 --enable-chunked-prefill --api-key local --served-model-name $(SERVED_MODEL_NAME_FP8)
 RUNTIME_ARGS_BASE_BF16 := --language-model-only --dtype bfloat16 --kv-cache-dtype fp8_e4m3 --enable-chunked-prefill --api-key local --served-model-name $(SERVED_MODEL_NAME_BF16)
@@ -202,8 +204,26 @@ run-qwen35-awq-boot:
 	  --gpu-memory-utilization $(GPU_MEM_UTIL_AWQ_BOOT) \
 	  --max-model-len $(MAX_MODEL_LEN) \
 	  --max-num-seqs $(MAX_NUM_SEQS) \
-	  --max-num-batched-tokens $(MAX_NUM_BATCHED_TOKENS_AWQ_BOOT) \
-	  --enforce-eager \
+	--max-num-batched-tokens $(MAX_NUM_BATCHED_TOKENS_AWQ_BOOT) \
+	--enforce-eager \
+	$(RUNTIME_ARGS_AWQ)
+	docker logs --follow $(CONTAINER_NAME) 2>&1 | tee out.log
+
+run-qwen35-awq-fast:
+	@printf 'Starting AWQ fast path on $(MODEL_PATH_AWQ)\n'
+	@test -d $(MODEL_PATH_AWQ) || (echo "Missing AWQ model directory: $(MODEL_PATH_AWQ). Download required." && exit 1)
+	-@docker rm -f $(CONTAINER_NAME) >/dev/null 2>&1
+	docker run -d --name $(CONTAINER_NAME) \
+	  $(COMMON_DOCKER_ARGS) \
+	  -v $(MODEL_PATH_AWQ):/model:ro \
+	  $(IMAGE) \
+	  /model \
+	  --host 0.0.0.0 --port 8000 \
+	  --tensor-parallel-size $(TP_SIZE) \
+	  --gpu-memory-utilization $(GPU_MEM_UTIL_AWQ_FAST) \
+	  --max-model-len $(MAX_MODEL_LEN) \
+	  --max-num-seqs $(MAX_NUM_SEQS) \
+	  --max-num-batched-tokens $(MAX_NUM_BATCHED_TOKENS_AWQ_FAST) \
 	  $(RUNTIME_ARGS_AWQ)
 	docker logs --follow $(CONTAINER_NAME) 2>&1 | tee out.log
 
