@@ -1,4 +1,4 @@
-.PHONY: up down logs status run-qwen35-boot run-qwen35-fast run-qwen35-bf16-boot run-qwen35-bf16-fast run-qwen35-awq-boot bench bench-bf16 bench-fp8
+.PHONY: up down logs status run-qwen35-boot run-qwen35-fast run-qwen35-bf16-boot run-qwen35-bf16-fast run-qwen35-bf16-tp2-boot run-qwen35-bf16-tp2-fast run-qwen35-awq-boot bench bench-bf16 bench-fp8
 
 CONTAINER_NAME := vllm-qwen35
 IMAGE := vllm/vllm-openai:cu130-nightly-x86_64
@@ -11,6 +11,8 @@ CACHE_PATH := $(HOME)/.cache/vllm
 
 GPU_IDS := 1
 TP_SIZE := 1
+GPU_IDS_BF16_TP2 := 0,1
+TP_SIZE_BF16_TP2 := 2
 MAX_MODEL_LEN := 262144
 MAX_NUM_SEQS := 1
 
@@ -23,12 +25,16 @@ GPU_MEM_UTIL_BOOT := 0.70
 GPU_MEM_UTIL_FAST := 0.84
 GPU_MEM_UTIL_BF16_BOOT := 0.78
 GPU_MEM_UTIL_BF16_FAST := 0.84
+GPU_MEM_UTIL_BF16_TP2_BOOT := 0.86
+GPU_MEM_UTIL_BF16_TP2_FAST := 0.84
 GPU_MEM_UTIL_AWQ_BOOT := 0.90
 
 MAX_NUM_BATCHED_TOKENS_BOOT := 1024
 MAX_NUM_BATCHED_TOKENS_FAST := 4096
 MAX_NUM_BATCHED_TOKENS_BF16_BOOT := 2048
 MAX_NUM_BATCHED_TOKENS_BF16_FAST := 4096
+MAX_NUM_BATCHED_TOKENS_BF16_TP2_BOOT := 2048
+MAX_NUM_BATCHED_TOKENS_BF16_TP2_FAST := 4096
 MAX_NUM_BATCHED_TOKENS_AWQ_BOOT := 8192
 
 RUNTIME_ARGS_BASE := --language-model-only --kv-cache-dtype fp8_e4m3 --enable-chunked-prefill --api-key local --served-model-name $(SERVED_MODEL_NAME_FP8)
@@ -126,6 +132,57 @@ run-qwen35-bf16-fast:
 	  --max-model-len $(MAX_MODEL_LEN) \
 	  --max-num-seqs $(MAX_NUM_SEQS) \
 	  --max-num-batched-tokens $(MAX_NUM_BATCHED_TOKENS_BF16_FAST) \
+	  --enforce-eager \
+	  --speculative-config '{"method":"mtp","num_speculative_tokens":1}' \
+	  $(RUNTIME_ARGS_BF16)
+	docker logs --follow $(CONTAINER_NAME) 2>&1 | tee out.log
+
+run-qwen35-bf16-tp2-boot:
+	@printf 'Starting BF16 TP2 boot path on $(MODEL_PATH_BF16)\n'
+	@test -d $(MODEL_PATH_BF16) || (echo "Missing BF16 model directory: $(MODEL_PATH_BF16). Download required." && exit 1)
+	-@docker rm -f $(CONTAINER_NAME) >/dev/null 2>&1
+	docker run -d --name $(CONTAINER_NAME) \
+	  --gpus '"device=$(GPU_IDS_BF16_TP2)"' --ipc=host \
+	  -e LD_PRELOAD=/lib/x86_64-linux-gnu/libcuda.so.1 \
+	  -e LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:/usr/local/cuda/compat \
+	  -e PYTORCH_ALLOC_CONF=expandable_segments:True \
+	  -p 8000:8000 \
+	  -v $(CACHE_PATH):/cache \
+	  --restart no \
+	  -v $(MODEL_PATH_BF16):/model:ro \
+	  $(IMAGE) \
+	  /model \
+	  --host 0.0.0.0 --port 8000 \
+	  --tensor-parallel-size $(TP_SIZE_BF16_TP2) \
+	  --gpu-memory-utilization $(GPU_MEM_UTIL_BF16_TP2_BOOT) \
+	  --max-model-len $(MAX_MODEL_LEN) \
+	  --max-num-seqs $(MAX_NUM_SEQS) \
+	  --max-num-batched-tokens $(MAX_NUM_BATCHED_TOKENS_BF16_TP2_BOOT) \
+	  --enforce-eager \
+	  $(RUNTIME_ARGS_BF16)
+	docker logs --follow $(CONTAINER_NAME) 2>&1 | tee out.log
+
+run-qwen35-bf16-tp2-fast:
+	@printf 'Starting BF16 TP2 fast path on $(MODEL_PATH_BF16)\n'
+	@test -d $(MODEL_PATH_BF16) || (echo "Missing BF16 model directory: $(MODEL_PATH_BF16). Download required." && exit 1)
+	-@docker rm -f $(CONTAINER_NAME) >/dev/null 2>&1
+	docker run -d --name $(CONTAINER_NAME) \
+	  --gpus '"device=$(GPU_IDS_BF16_TP2)"' --ipc=host \
+	  -e LD_PRELOAD=/lib/x86_64-linux-gnu/libcuda.so.1 \
+	  -e LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:/usr/local/cuda/compat \
+	  -e PYTORCH_ALLOC_CONF=expandable_segments:True \
+	  -p 8000:8000 \
+	  -v $(CACHE_PATH):/cache \
+	  --restart no \
+	  -v $(MODEL_PATH_BF16):/model:ro \
+	  $(IMAGE) \
+	  /model \
+	  --host 0.0.0.0 --port 8000 \
+	  --tensor-parallel-size $(TP_SIZE_BF16_TP2) \
+	  --gpu-memory-utilization $(GPU_MEM_UTIL_BF16_TP2_FAST) \
+	  --max-model-len $(MAX_MODEL_LEN) \
+	  --max-num-seqs $(MAX_NUM_SEQS) \
+	  --max-num-batched-tokens $(MAX_NUM_BATCHED_TOKENS_BF16_TP2_FAST) \
 	  --enforce-eager \
 	  --speculative-config '{"method":"mtp","num_speculative_tokens":1}' \
 	  $(RUNTIME_ARGS_BF16)
