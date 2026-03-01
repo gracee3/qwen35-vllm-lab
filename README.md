@@ -19,7 +19,9 @@
 
 - AWQ directory validated:
   - `/data/models/QuantTrio/Qwen3.5-27B-AWQ` exists and contains `config.json`.
-- Attempted path on this host image (`vllm/vllm-openai:cu130-nightly-x86_64`, v0.16.1rc1.dev48+ga572baff5):
+- Attempted paths on this host image:
+  - `vllm/vllm-openai:cu130-nightly-x86_64` (v0.16.1rc1.dev48+ga572baff5) is affected by a runtime regression in `RMSNormGated` and fails during AWQ init.
+  - `vllm/vllm-openai:nightly` does not show this regression.
   1) `make run-qwen35-awq-boot`  
      - Starts model load and conversion to `awq_marlin`.
      - Fails during engine dummy-run path with:
@@ -33,21 +35,70 @@
 
 ## Current status (2026-03-01)
 
-- AWQ TP2 boot is now stable on vLLM `v0.16.1rc1.dev48+ga572baff5` when running with:
+- AWQ TP2 fast/boot is currently expected to be run against `vllm/vllm-openai:nightly` when this regression is present:
   - `--tensor-parallel-size 2`
   - `--language-model-only`
   - `OMP_NUM_THREADS=4`
 - `make bench` now works via a dedicated benchmark helper script.
-- Latest measured throughput (single request at a time, 512 max tokens): ~95 tok/s
+- Use `IMAGE=vllm/vllm-openai:nightly` (or your validated fixed build) when running AWQ TP2.
+- Latest measured throughput (latest successful TP2 run):
+  - command:
+    ```sh
+    python3 - <<'PY'
+    import json, time, statistics, urllib.request
+    url = "http://127.0.0.1:8000/v1/completions"
+    payload = {
+      "model": "qwen35a3b-awq",
+      "prompt": "Explain tensor parallelism in language model inference with one short paragraph.",
+      "temperature": 0.2,
+      "top_p": 0.9,
+      "max_tokens": 4,
+    }
+    headers = {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer local",
+      "Connection": "close",
+    }
+    body = json.dumps(payload).encode()
+    latencies = []
+    total_tokens = 0
+    for _ in range(30):
+      req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+      start = time.perf_counter()
+      with urllib.request.urlopen(req, timeout=120) as resp:
+          data = json.loads(resp.read().decode())
+      latencies.append(time.perf_counter() - start)
+      total_tokens += data.get("usage", {}).get("completion_tokens", 0)
+    print(f"total_tokens={total_tokens}")
+    print(f"wall={sum(latencies):.3f}s")
+    print(f"tok/s={total_tokens / sum(latencies):.2f}")
+    print(f"p50={statistics.median(latencies):.3f}s")
+    PY
+    ```
+  - Result: `120 / 13.040s = 9.20 tok/s` (single request at a time, 30 runs, max_tokens=4).
+  - Caveat: outputs from this run were low-quality/garbage, so this is an inferential throughput-only baseline rather than a quality benchmark.
+
+- For the 35B AWQ run, the default target is `AWQ_VARIANT=35B` (`/data/models/QuantTrio/Qwen3.5-35B-A3B-AWQ`).
+
+### 35B AWQ TP2 workflow
+
+- Start TP2 inference:
+  - `make run-qwen35-awq-tp2-fast`
+  - `make run-qwen35-awq-tp2-boot` (if you want non-speculative boot mode)
+- Run context/throughput sweep:
+  - `make bench-context-sweep BENCH_CONTEXT_PROMPT_WORDS="1024 2048 3072 4096 8192 12288" BENCH_MAX_TOKENS=256 BENCH_MODEL_NAME=qwen35a3b-awq`
+- Tune memory budget per context target:
+  - `make run-qwen35-awq-tp2-fast MAX_MODEL_LEN_AWQ_TP2=262144 GPU_MEM_UTIL_AWQ_TP2_FAST=0.94`
+  - If startup fails at cache init, lower `MAX_MODEL_LEN_AWQ_TP2` first.
 
 ## Practical throughput tuning
 
 - Run with higher in-flight requests once generation quality is acceptable:
   - `BENCH_REQUESTS=4`
   - `BENCH_CONCURRENCY=4`
-- Example current-throughput run:
-  - `make bench BENCH_MODEL_NAME=MY_MODEL BENCH_RUNS=3 BENCH_REQUESTS=8 BENCH_CONCURRENCY=8 BENCH_MAX_TOKENS=512`
-  - observed throughput: ~463 tok/s aggregate over 8 concurrent 512-token requests
+- For chat-completions benchmarking use `make bench`:
+  - `make bench BENCH_URL=http://127.0.0.1:8000/v1/chat/completions BENCH_MODEL_NAME=qwen35a3b-awq BENCH_RUNS=3`
+- Completions-endpoint throughput can be measured with the custom snippet in the status section; no longer using 463 tok/s as a headline number.
 - Keep `MAX_NUM_SEQS`, `MAX_NUM_BATCHED_TOKENS`, and KV cache settings aligned to your expected traffic profile.
 - Remove tool/structured-output features when benchmarking for raw speed:
   - drop `--enable-auto-tool-choice`
