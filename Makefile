@@ -5,7 +5,9 @@ IMAGE := vllm/vllm-openai:cu130-nightly-x86_64
 
 MODEL_PATH_FP8 := /data/models/Qwen3.5-35B-A3B-FP8
 MODEL_PATH_BF16 := /data/models/Qwen/Qwen3.5-35B-A3B
-MODEL_PATH_AWQ := /data/models/QuantTrio/Qwen3.5-35B-A3B-AWQ
+MODEL_PATH_AWQ_27B := /data/models/QuantTrio/Qwen3.5-27B-AWQ
+MODEL_PATH_AWQ_35B := /data/models/QuantTrio/Qwen3.5-35B-A3B-AWQ
+MODEL_PATH_AWQ := $(if $(wildcard $(MODEL_PATH_AWQ_27B)), $(MODEL_PATH_AWQ_27B), $(MODEL_PATH_AWQ_35B))
 MODEL_PATH := $(MODEL_PATH_FP8)
 CACHE_PATH := $(HOME)/.cache/vllm
 
@@ -20,6 +22,12 @@ SERVED_MODEL_NAME_FP8 := qwen35a3b-fp8
 SERVED_MODEL_NAME_BF16 := qwen35a3b-bf16
 SERVED_MODEL_NAME_AWQ := qwen35a3b-awq
 BENCH_MODEL_NAME ?= $(SERVED_MODEL_NAME_BF16)
+BENCH_URL ?= http://localhost:8000/v1/chat/completions
+BENCH_RUNS ?= 5
+BENCH_REQUESTS ?= 1
+BENCH_CONCURRENCY ?= 1
+BENCH_MAX_TOKENS ?= 512
+BENCH_PROMPT ?= Explain tensor parallelism concisely, then give one example.
 
 GPU_MEM_UTIL_BOOT := 0.70
 GPU_MEM_UTIL_FAST := 0.84
@@ -239,47 +247,14 @@ status:
 	docker ps -a --filter name=$(CONTAINER_NAME)
 
 bench:
-	python3 - <<-'PY'
-	import json
-	import time
-	import urllib.request
-	
-	URL = "http://localhost:8000/v1/chat/completions"
-	HEADERS = {
-	  "Content-Type": "application/json",
-	  "Authorization": "Bearer local",
-	}
-	MODEL = "$(BENCH_MODEL_NAME)"
-	payload = {
-	  "model": MODEL,
-	  "messages": [{"role": "user", "content": "Explain tensor parallelism concisely, then give one example."}],
-	  "temperature": 0.0,
-	  "max_tokens": 512,
-	  "stream": False,
-	}
-	
-	
-	def run():
-	  req = urllib.request.Request(
-	    URL,
-	    data=json.dumps(payload).encode(),
-	    headers=HEADERS,
-	    method="POST",
-	  )
-	  t0 = time.perf_counter()
-	  with urllib.request.urlopen(req, timeout=600) as response:
-	    result = json.loads(response.read().decode())
-	  t1 = time.perf_counter()
-	  completion_tokens = result.get("usage", {}).get("completion_tokens", 0)
-	  return (t1 - t0), completion_tokens
-	
-	
-	time_s, tokens = run()
-	print(f"warmup: {time_s:.3f}s  completion={tokens}  decode={tokens/time_s:.1f} tok/s")
-	for i in range(5):
-	  time_s, tokens = run()
-	  print(f"run{i + 1}: {time_s:.3f}s  completion={tokens}  decode={tokens/time_s:.1f} tok/s")
-	PY
+	python3 scripts/bench_vllm.py \
+	  --url $(BENCH_URL) \
+	  --model $(BENCH_MODEL_NAME) \
+	  --runs $(BENCH_RUNS) \
+	  --requests $(BENCH_REQUESTS) \
+	  --concurrency $(BENCH_CONCURRENCY) \
+	  --max-tokens $(BENCH_MAX_TOKENS) \
+	  --prompt '$(BENCH_PROMPT)'
 
 bench-bf16:
 	$(MAKE) BENCH_MODEL_NAME=$(SERVED_MODEL_NAME_BF16) bench
