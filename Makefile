@@ -1,263 +1,150 @@
-.PHONY: up down logs status run-qwen35-boot run-qwen35-fast run-qwen35-bf16-boot run-qwen35-bf16-fast run-qwen35-bf16-tp2-boot run-qwen35-bf16-tp2-fast run-qwen35-awq-boot run-qwen35-awq-fast bench bench-bf16 bench-fp8
+# Qwen3.5 vLLM launcher
+# Single-file, minimal setup for 9B, 27B, and 4B local model directories.
 
-CONTAINER_NAME := vllm-qwen35
-IMAGE := vllm/vllm-openai:cu130-nightly-x86_64
+.PHONY: setup build run-llm \
+	run-qwen35-9b run-qwen35-27b run-qwen35-4b \
+	stop stop-llm stop-qwen35-9b stop-qwen35-27b stop-qwen35-4b \
+	logs logs-llm logs-qwen35-9b logs-qwen35-27b logs-qwen35-4b
 
-MODEL_PATH_FP8 := /data/models/Qwen3.5-35B-A3B-FP8
-MODEL_PATH_BF16 := /data/models/Qwen/Qwen3.5-35B-A3B
-MODEL_PATH_AWQ_27B := /data/models/QuantTrio/Qwen3.5-27B-AWQ
-MODEL_PATH_AWQ_35B := /data/models/QuantTrio/Qwen3.5-35B-A3B-AWQ
-MODEL_PATH_AWQ := $(if $(wildcard $(MODEL_PATH_AWQ_27B)), $(MODEL_PATH_AWQ_27B), $(MODEL_PATH_AWQ_35B))
-MODEL_PATH := $(MODEL_PATH_FP8)
+# Images
+IMAGE := vllm/vllm-openai:v0.18.0
+
+# Paths
 CACHE_PATH := $(HOME)/.cache/vllm
+MODEL_PATH ?= /data/models/Qwen/Qwen3.5-9B
 
-GPU_IDS := 1
-TP_SIZE := 1
-GPU_IDS_BF16_TP2 := 0,1
-TP_SIZE_BF16_TP2 := 2
-MAX_MODEL_LEN := 262144
-MAX_NUM_SEQS := 1
+# Docker
+DOCKER_RESTART_POLICY ?= no
+DOCKER_PULL_POLICY ?= never
 
-SERVED_MODEL_NAME_FP8 := qwen35a3b-fp8
-SERVED_MODEL_NAME_BF16 := qwen35a3b-bf16
-SERVED_MODEL_NAME_AWQ := qwen35a3b-awq
-BENCH_MODEL_NAME ?= $(SERVED_MODEL_NAME_BF16)
-BENCH_URL ?= http://localhost:8000/v1/chat/completions
-BENCH_RUNS ?= 5
-BENCH_REQUESTS ?= 1
-BENCH_CONCURRENCY ?= 1
-BENCH_MAX_TOKENS ?= 512
-BENCH_PROMPT ?= Explain tensor parallelism concisely, then give one example.
+# Networking
+PORT ?= 8000
+API_KEY ?= local
 
-GPU_MEM_UTIL_BOOT := 0.70
-GPU_MEM_UTIL_FAST := 0.84
-GPU_MEM_UTIL_BF16_BOOT := 0.78
-GPU_MEM_UTIL_BF16_FAST := 0.84
-GPU_MEM_UTIL_BF16_TP2_BOOT := 0.86
-GPU_MEM_UTIL_BF16_TP2_FAST := 0.84
-GPU_MEM_UTIL_AWQ_BOOT := 0.90
-GPU_MEM_UTIL_AWQ_FAST := 0.90
-
-MAX_NUM_BATCHED_TOKENS_BOOT := 1024
-MAX_NUM_BATCHED_TOKENS_FAST := 4096
-MAX_NUM_BATCHED_TOKENS_BF16_BOOT := 2048
-MAX_NUM_BATCHED_TOKENS_BF16_FAST := 4096
-MAX_NUM_BATCHED_TOKENS_BF16_TP2_BOOT := 2048
-MAX_NUM_BATCHED_TOKENS_BF16_TP2_FAST := 4096
-MAX_NUM_BATCHED_TOKENS_AWQ_BOOT := 8192
-MAX_NUM_BATCHED_TOKENS_AWQ_FAST := 8192
-
-RUNTIME_ARGS_BASE := --language-model-only --kv-cache-dtype fp8_e4m3 --enable-chunked-prefill --api-key local --served-model-name $(SERVED_MODEL_NAME_FP8)
-RUNTIME_ARGS_BASE_BF16 := --language-model-only --dtype bfloat16 --kv-cache-dtype fp8_e4m3 --enable-chunked-prefill --api-key local --served-model-name $(SERVED_MODEL_NAME_BF16)
-RUNTIME_ARGS_BASE_AWQ := --language-model-only --kv-cache-dtype fp8_e4m3 --enable-chunked-prefill --api-key local --served-model-name $(SERVED_MODEL_NAME_AWQ)
-RUNTIME_ARGS_TOOLS := --enable-auto-tool-choice --tool-call-parser qwen3_coder
-TOOL_CALLING ?= 0
-
-RUNTIME_ARGS := $(RUNTIME_ARGS_BASE)
-RUNTIME_ARGS_BF16 := $(RUNTIME_ARGS_BASE_BF16)
-RUNTIME_ARGS_AWQ := $(RUNTIME_ARGS_BASE_AWQ)
-ifeq ($(TOOL_CALLING),1)
-RUNTIME_ARGS += $(RUNTIME_ARGS_TOOLS)
-RUNTIME_ARGS_BF16 += $(RUNTIME_ARGS_TOOLS)
-RUNTIME_ARGS_AWQ += $(RUNTIME_ARGS_TOOLS)
+# GPU pinning
+# GPU=0, GPU=1, GPU=0,1, or GPU=all
+GPU ?= 1
+ifeq ($(GPU),all)
+  GPU_FLAG := --gpus all
+else
+  GPU_FLAG := --gpus '"device=$(GPU)"'
 endif
 
-COMMON_DOCKER_ARGS := \
-  --gpus '"device=$(GPU_IDS)"' --ipc=host \
-  -e LD_PRELOAD=/lib/x86_64-linux-gnu/libcuda.so.1 \
-  -e LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:/usr/local/cuda/compat \
-  -e PYTORCH_ALLOC_CONF=expandable_segments:True \
-  -p 8000:8000 \
-  -v $(CACHE_PATH):/cache \
-  --restart no
+# vLLM defaults
+CONTAINER_NAME ?= vllm-qwen35-9b
+SERVED_MODEL_NAME ?= qwen35-9b
+TP_SIZE ?= 1
+GPU_MEM_UTIL ?= 0.92
+MAX_MODEL_LEN ?= 16384
+MAX_NUM_SEQS ?= 4
+MAX_NUM_BATCHED_TOKENS ?= 4096
+TOOL_CALL_PARSER ?= qwen3_xml
+CPU_OFFLOAD_GB ?= 0
 
-run-qwen35-boot:
-# Known: on RTX 3090 this fp8 path often fails at init with MARLIN FP8 MoE OOM.
-	-@docker rm -f $(CONTAINER_NAME) >/dev/null 2>&1
-	docker run -d --name $(CONTAINER_NAME) \
-	  $(COMMON_DOCKER_ARGS) \
-	  -v $(MODEL_PATH_FP8):/model:ro \
-	  $(IMAGE) \
-	  /model \
-	  --host 0.0.0.0 --port 8000 \
-	  --tensor-parallel-size $(TP_SIZE) \
-	  --gpu-memory-utilization $(GPU_MEM_UTIL_BOOT) \
-	  --max-model-len $(MAX_MODEL_LEN) \
-	  --max-num-seqs $(MAX_NUM_SEQS) \
-	  --max-num-batched-tokens $(MAX_NUM_BATCHED_TOKENS_BOOT) \
-	  --enforce-eager \
-	  $(RUNTIME_ARGS)
-	docker logs --follow $(CONTAINER_NAME) 2>&1 | tee out.log
+setup:
+	mkdir -p $(CACHE_PATH)
 
-run-qwen35-fast:
-# Known: on RTX 3090 this fp8 fast path is often blocked by the same init OOM behavior.
-	-@docker rm -f $(CONTAINER_NAME) >/dev/null 2>&1
-	docker run -d --name $(CONTAINER_NAME) \
-	  $(COMMON_DOCKER_ARGS) \
-	  -v $(MODEL_PATH_FP8):/model:ro \
-	  $(IMAGE) \
-	  /model \
-	  --host 0.0.0.0 --port 8000 \
-	  --tensor-parallel-size $(TP_SIZE) \
-	  --gpu-memory-utilization $(GPU_MEM_UTIL_FAST) \
-	  --max-model-len $(MAX_MODEL_LEN) \
-	  --max-num-seqs $(MAX_NUM_SEQS) \
-	  --max-num-batched-tokens $(MAX_NUM_BATCHED_TOKENS_FAST) \
-	  --enforce-eager \
-	  --speculative-config '{"method":"mtp","num_speculative_tokens":1}' \
-	  $(RUNTIME_ARGS)
-	docker logs --follow $(CONTAINER_NAME) 2>&1 | tee out.log
+build:
+ifeq ($(DOCKER_PULL_POLICY),never)
+	@echo "Skipping docker pull because DOCKER_PULL_POLICY=never"
+else
+	docker pull $(IMAGE)
+endif
 
-run-qwen35-bf16-boot:
-	@printf 'Starting BF16 boot path on $(MODEL_PATH_BF16)\n'
-	@test -d $(MODEL_PATH_BF16) || (echo "Missing BF16 model directory: $(MODEL_PATH_BF16). Download required." && exit 1)
-	-@docker rm -f $(CONTAINER_NAME) >/dev/null 2>&1
-	docker run -d --name $(CONTAINER_NAME) \
-	  $(COMMON_DOCKER_ARGS) \
-	  -v $(MODEL_PATH_BF16):/model:ro \
-	  $(IMAGE) \
-	  /model \
-	  --host 0.0.0.0 --port 8000 \
-	  --tensor-parallel-size $(TP_SIZE) \
-	  --gpu-memory-utilization $(GPU_MEM_UTIL_BF16_BOOT) \
-	  --max-model-len $(MAX_MODEL_LEN) \
-	  --max-num-seqs $(MAX_NUM_SEQS) \
-	  --max-num-batched-tokens $(MAX_NUM_BATCHED_TOKENS_BF16_BOOT) \
-	  --enforce-eager \
-	  $(RUNTIME_ARGS_BF16)
-	docker logs --follow $(CONTAINER_NAME) 2>&1 | tee out.log
+run-llm: stop-llm build setup
+	@test -d $(MODEL_PATH) || (echo "Missing model directory: $(MODEL_PATH)" && exit 1)
+	docker run -d \
+		--name $(CONTAINER_NAME) \
+		$(GPU_FLAG) \
+		--ipc=host \
+		-p $(PORT):8000 \
+		-v $(MODEL_PATH):/model:ro \
+		-v $(CACHE_PATH):/root/.cache \
+		--restart $(DOCKER_RESTART_POLICY) \
+		--pull $(DOCKER_PULL_POLICY) \
+		$(IMAGE) \
+		/model \
+		--host 0.0.0.0 \
+		--port 8000 \
+		--api-key $(API_KEY) \
+		--gpu-memory-utilization $(GPU_MEM_UTIL) \
+		--tensor-parallel-size $(TP_SIZE) \
+		--max-model-len $(MAX_MODEL_LEN) \
+		--max-num-batched-tokens $(MAX_NUM_BATCHED_TOKENS) \
+		--max-num-seqs $(MAX_NUM_SEQS) \
+		--cpu-offload-gb $(CPU_OFFLOAD_GB) \
+		--language-model-only \
+		--served-model-name $(SERVED_MODEL_NAME) \
+		--reasoning-parser qwen3 \
+		--enable-auto-tool-choice \
+		--tool-call-parser $(TOOL_CALL_PARSER) \
+		$(EXTRA_ARGS)
+	docker logs -f $(CONTAINER_NAME)
 
-run-qwen35-bf16-fast:
-	@printf 'Starting BF16 fast path on $(MODEL_PATH_BF16)\n'
-	@test -d $(MODEL_PATH_BF16) || (echo "Missing BF16 model directory: $(MODEL_PATH_BF16). Download required." && exit 1)
-	-@docker rm -f $(CONTAINER_NAME) >/dev/null 2>&1
-	docker run -d --name $(CONTAINER_NAME) \
-	  $(COMMON_DOCKER_ARGS) \
-	  -v $(MODEL_PATH_BF16):/model:ro \
-	  $(IMAGE) \
-	  /model \
-	  --host 0.0.0.0 --port 8000 \
-	  --tensor-parallel-size $(TP_SIZE) \
-	  --gpu-memory-utilization $(GPU_MEM_UTIL_BF16_FAST) \
-	  --max-model-len $(MAX_MODEL_LEN) \
-	  --max-num-seqs $(MAX_NUM_SEQS) \
-	  --max-num-batched-tokens $(MAX_NUM_BATCHED_TOKENS_BF16_FAST) \
-	  --enforce-eager \
-	  --speculative-config '{"method":"mtp","num_speculative_tokens":1}' \
-	  $(RUNTIME_ARGS_BF16)
-	docker logs --follow $(CONTAINER_NAME) 2>&1 | tee out.log
+run-qwen35-9b:
+	$(MAKE) -f $(lastword $(MAKEFILE_LIST)) run-llm \
+		CONTAINER_NAME=vllm-qwen35-9b \
+		MODEL_PATH=/data/models/Qwen/Qwen3.5-9B \
+		SERVED_MODEL_NAME=qwen35-9b \
+		GPU=1 \
+		TP_SIZE=1 \
+		GPU_MEM_UTIL=0.92 \
+		MAX_MODEL_LEN=16384 \
+		MAX_NUM_SEQS=4 \
+		MAX_NUM_BATCHED_TOKENS=4096
 
-run-qwen35-bf16-tp2-boot:
-	@printf 'Starting BF16 TP2 boot path on $(MODEL_PATH_BF16)\n'
-	@test -d $(MODEL_PATH_BF16) || (echo "Missing BF16 model directory: $(MODEL_PATH_BF16). Download required." && exit 1)
-	-@docker rm -f $(CONTAINER_NAME) >/dev/null 2>&1
-	docker run -d --name $(CONTAINER_NAME) \
-	  --gpus '"device=$(GPU_IDS_BF16_TP2)"' --ipc=host \
-	  -e LD_PRELOAD=/lib/x86_64-linux-gnu/libcuda.so.1 \
-	  -e LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:/usr/local/cuda/compat \
-	  -e PYTORCH_ALLOC_CONF=expandable_segments:True \
-	  -p 8000:8000 \
-	  -v $(CACHE_PATH):/cache \
-	  --restart no \
-	  -v $(MODEL_PATH_BF16):/model:ro \
-	  $(IMAGE) \
-	  /model \
-	  --host 0.0.0.0 --port 8000 \
-	  --tensor-parallel-size $(TP_SIZE_BF16_TP2) \
-	  --gpu-memory-utilization $(GPU_MEM_UTIL_BF16_TP2_BOOT) \
-	  --max-model-len $(MAX_MODEL_LEN) \
-	  --max-num-seqs $(MAX_NUM_SEQS) \
-	  --max-num-batched-tokens $(MAX_NUM_BATCHED_TOKENS_BF16_TP2_BOOT) \
-	  --enforce-eager \
-	  $(RUNTIME_ARGS_BF16)
-	docker logs --follow $(CONTAINER_NAME) 2>&1 | tee out.log
+run-qwen35-27b:
+	$(MAKE) -f $(lastword $(MAKEFILE_LIST)) run-llm \
+		CONTAINER_NAME=vllm-qwen35-27b \
+		MODEL_PATH=/data/models/Qwen/Qwen3.5-27B \
+		SERVED_MODEL_NAME=qwen35-27b \
+		GPU=0,1 \
+		TP_SIZE=2 \
+		GPU_MEM_UTIL=0.85 \
+		MAX_MODEL_LEN=8192 \
+		MAX_NUM_SEQS=1 \
+		MAX_NUM_BATCHED_TOKENS=2048 \
+		CPU_OFFLOAD_GB=8
 
-run-qwen35-bf16-tp2-fast:
-	@printf 'Starting BF16 TP2 fast path on $(MODEL_PATH_BF16)\n'
-	@test -d $(MODEL_PATH_BF16) || (echo "Missing BF16 model directory: $(MODEL_PATH_BF16). Download required." && exit 1)
-	-@docker rm -f $(CONTAINER_NAME) >/dev/null 2>&1
-	docker run -d --name $(CONTAINER_NAME) \
-	  --gpus '"device=$(GPU_IDS_BF16_TP2)"' --ipc=host \
-	  -e LD_PRELOAD=/lib/x86_64-linux-gnu/libcuda.so.1 \
-	  -e LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:/usr/local/cuda/compat \
-	  -e PYTORCH_ALLOC_CONF=expandable_segments:True \
-	  -p 8000:8000 \
-	  -v $(CACHE_PATH):/cache \
-	  --restart no \
-	  -v $(MODEL_PATH_BF16):/model:ro \
-	  $(IMAGE) \
-	  /model \
-	  --host 0.0.0.0 --port 8000 \
-	  --tensor-parallel-size $(TP_SIZE_BF16_TP2) \
-	  --gpu-memory-utilization $(GPU_MEM_UTIL_BF16_TP2_FAST) \
-	  --max-model-len $(MAX_MODEL_LEN) \
-	  --max-num-seqs $(MAX_NUM_SEQS) \
-	  --max-num-batched-tokens $(MAX_NUM_BATCHED_TOKENS_BF16_TP2_FAST) \
-	  --enforce-eager \
-	  --speculative-config '{"method":"mtp","num_speculative_tokens":1}' \
-	  $(RUNTIME_ARGS_BF16)
-	docker logs --follow $(CONTAINER_NAME) 2>&1 | tee out.log
+run-qwen35-4b:
+	$(MAKE) -f $(lastword $(MAKEFILE_LIST)) run-llm \
+		CONTAINER_NAME=vllm-qwen35-4b \
+		MODEL_PATH=/data/models/Qwen/Qwen3.5-4B \
+		SERVED_MODEL_NAME=qwen35-4b \
+		GPU=1 \
+		TP_SIZE=1 \
+		GPU_MEM_UTIL=0.92 \
+		MAX_MODEL_LEN=16384 \
+		MAX_NUM_SEQS=4 \
+		MAX_NUM_BATCHED_TOKENS=4096
 
-run-qwen35-awq-boot:
-	@printf 'Starting AWQ boot path on $(MODEL_PATH_AWQ)\n'
-	@test -d $(MODEL_PATH_AWQ) || (echo "Missing AWQ model directory: $(MODEL_PATH_AWQ). Download required." && exit 1)
-	-@docker rm -f $(CONTAINER_NAME) >/dev/null 2>&1
-	docker run -d --name $(CONTAINER_NAME) \
-	  $(COMMON_DOCKER_ARGS) \
-	  -v $(MODEL_PATH_AWQ):/model:ro \
-	  $(IMAGE) \
-	  /model \
-	  --host 0.0.0.0 --port 8000 \
-	  --tensor-parallel-size $(TP_SIZE) \
-	  --gpu-memory-utilization $(GPU_MEM_UTIL_AWQ_BOOT) \
-	  --max-model-len $(MAX_MODEL_LEN) \
-	  --max-num-seqs $(MAX_NUM_SEQS) \
-	--max-num-batched-tokens $(MAX_NUM_BATCHED_TOKENS_AWQ_BOOT) \
-	--enforce-eager \
-	$(RUNTIME_ARGS_AWQ)
-	docker logs --follow $(CONTAINER_NAME) 2>&1 | tee out.log
+up: run-qwen35-9b
 
-run-qwen35-awq-fast:
-	@printf 'Starting AWQ fast path on $(MODEL_PATH_AWQ)\n'
-	@test -d $(MODEL_PATH_AWQ) || (echo "Missing AWQ model directory: $(MODEL_PATH_AWQ). Download required." && exit 1)
-	-@docker rm -f $(CONTAINER_NAME) >/dev/null 2>&1
-	docker run -d --name $(CONTAINER_NAME) \
-	  $(COMMON_DOCKER_ARGS) \
-	  -v $(MODEL_PATH_AWQ):/model:ro \
-	  $(IMAGE) \
-	  /model \
-	  --host 0.0.0.0 --port 8000 \
-	  --tensor-parallel-size $(TP_SIZE) \
-	  --gpu-memory-utilization $(GPU_MEM_UTIL_AWQ_FAST) \
-	  --max-model-len $(MAX_MODEL_LEN) \
-	  --max-num-seqs $(MAX_NUM_SEQS) \
-	  --max-num-batched-tokens $(MAX_NUM_BATCHED_TOKENS_AWQ_FAST) \
-	  $(RUNTIME_ARGS_AWQ)
-	docker logs --follow $(CONTAINER_NAME) 2>&1 | tee out.log
+stop: stop-qwen35-9b
 
-up: run-qwen35-fast
+stop-llm:
+	docker stop $(CONTAINER_NAME) 2>/dev/null || true
+	docker rm $(CONTAINER_NAME) 2>/dev/null || true
 
-down:
-	docker rm -f $(CONTAINER_NAME)
+stop-qwen35-9b:
+	$(MAKE) -f $(lastword $(MAKEFILE_LIST)) stop-llm CONTAINER_NAME=vllm-qwen35-9b
 
-logs:
-	docker logs --follow $(CONTAINER_NAME) 2>&1 | tee out.log
+stop-qwen35-27b:
+	$(MAKE) -f $(lastword $(MAKEFILE_LIST)) stop-llm CONTAINER_NAME=vllm-qwen35-27b
 
-status:
-	docker ps -a --filter name=$(CONTAINER_NAME)
+stop-qwen35-4b:
+	$(MAKE) -f $(lastword $(MAKEFILE_LIST)) stop-llm CONTAINER_NAME=vllm-qwen35-4b
 
-bench:
-	python3 scripts/bench_vllm.py \
-	  --url $(BENCH_URL) \
-	  --model $(BENCH_MODEL_NAME) \
-	  --runs $(BENCH_RUNS) \
-	  --requests $(BENCH_REQUESTS) \
-	  --concurrency $(BENCH_CONCURRENCY) \
-	  --max-tokens $(BENCH_MAX_TOKENS) \
-	  --prompt '$(BENCH_PROMPT)'
+logs: logs-qwen35-9b
 
-bench-bf16:
-	$(MAKE) BENCH_MODEL_NAME=$(SERVED_MODEL_NAME_BF16) bench
+logs-llm:
+	docker logs -f $(CONTAINER_NAME)
 
-bench-fp8:
-	$(MAKE) BENCH_MODEL_NAME=$(SERVED_MODEL_NAME_FP8) bench
+logs-qwen35-9b:
+	$(MAKE) -f $(lastword $(MAKEFILE_LIST)) logs-llm CONTAINER_NAME=vllm-qwen35-9b
+
+logs-qwen35-27b:
+	$(MAKE) -f $(lastword $(MAKEFILE_LIST)) logs-llm CONTAINER_NAME=vllm-qwen35-27b
+
+logs-qwen35-4b:
+	$(MAKE) -f $(lastword $(MAKEFILE_LIST)) logs-llm CONTAINER_NAME=vllm-qwen35-4b
